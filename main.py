@@ -19,7 +19,7 @@ load_dotenv()
 
 # Set page configuration
 st.set_page_config(
-    page_title="SmartPDF QA",
+    page_title="PDF Agent",
     page_icon="📚",
     layout="wide"
 )
@@ -43,7 +43,7 @@ embedding_model = OpenAIEmbeddings(model="text-embedding-3-large")
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
 # App title and description
-st.title("📚 SmartPDF QA")
+st.title("📚 QnA Agent for PDFs")
 st.markdown("Upload any PDF and ask questions about its content! If the answer isn't in the PDF, the app will search the web for you.")
 
 # Initialize session state variables if they don't exist
@@ -164,7 +164,9 @@ if st.session_state.pdf_processed and st.session_state.vector_store is not None:
         
         # Check if web search is needed
         if "[NEED_WEB_SEARCH]" in pdf_response:
-            st.info("Information not found in PDF. Searching the web...")
+            info_message = st.info("Information not found in PDF. Searching the web...")
+            time.sleep(2)
+            info_message.empty()
             return web_search_chain.invoke(question)
         else:
             return pdf_response
@@ -205,4 +207,3 @@ if st.session_state.chat_history:
     if st.button("Clear Chat History"):
         st.session_state.chat_history = []
         st.rerun()
-    
