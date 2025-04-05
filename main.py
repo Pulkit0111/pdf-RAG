@@ -4,7 +4,9 @@ from langchain_openai import OpenAIEmbeddings
 from dotenv import load_dotenv
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
-from langchain.chains import RetrievalQA
+from langchain import hub
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 import os
 
 load_dotenv()
@@ -12,8 +14,14 @@ load_dotenv()
 # Path of the PDF file
 file_path = "./data/numpy.pdf"
 
-# Embedding model for vectorization
+# Initialize the embedding model
 embedding_model = OpenAIEmbeddings(model="text-embedding-3-large")
+
+# See full prompt at https://smith.langchain.com/hub/rlm/rag-prompt
+prompt = hub.pull("rlm/rag-prompt")
+
+# Initialize the chat model
+llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
 
 # Check if FAISS index exists
 if os.path.exists("faiss_index"):
@@ -41,20 +49,25 @@ else:
 # Initialize retriever with top 3 results
 retriever = db.as_retriever(search_kwargs={"k": 3})
 
-# Initialize the chat model
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
 
-# Initialize the chain
-chain = RetrievalQA.from_chain_type(
-    llm=llm, chain_type="stuff", retriever=retriever
+chain = (
+    {
+        "context": retriever | format_docs,
+        "question": RunnablePassthrough(),
+    }
+    | prompt
+    | llm
+    | StrOutputParser()
 )
 
 # Run the PDF bot
 while True:
-    question = input("Enter a question:")
+    question = input("Enter a question: ")
     if question.lower() == "exit":
         print("GoodBye!")
         break
-    response = chain.invoke({"query": question})
-    print(f"\nPDF answer: {response['result']}\n")
+    response = chain.invoke(question)
+    print(f"\nPDF answer: {response}\n")
 
