@@ -1,6 +1,7 @@
 import streamlit as st # for implementing the UI
 import os # for file operations
 import tempfile # for creating a temporary directory
+import time # for adding a delay
 from langchain_community.document_loaders import PyMuPDFLoader # for loading the PDF
 from langchain_text_splitters import RecursiveCharacterTextSplitter # for splitting the documents
 from langchain_openai import OpenAIEmbeddings # for embedding the documents
@@ -10,21 +11,40 @@ from langchain import hub # for importing the prompt
 from langchain_core.output_parsers import StrOutputParser # for parsing the output
 from langchain_core.runnables import RunnablePassthrough # for running the chain
 from dotenv import load_dotenv # for loading the environment variables
-import time # for adding a delay
+from langchain_tavily import TavilySearch # for searching the web
+from langchain_core.prompts import ChatPromptTemplate # for creating custom prompts
 
 # Load environment variables
 load_dotenv()
 
 # Set page configuration
 st.set_page_config(
-    page_title="SmartPDF QA",
+    page_title="PDF Agent",
     page_icon="📚",
     layout="wide"
 )
 
+# Initialize the TavilySearch tool
+tool = TavilySearch(
+    max_results=3,
+    topic="general"
+)
+
+# Initialize the chat model
+llm = ChatOpenAI(
+    model="gpt-3.5-turbo",
+    temperature=0
+)
+
+# Initialize the embedding model
+embedding_model = OpenAIEmbeddings(model="text-embedding-3-large")
+
+# Initialize the text splitter
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+
 # App title and description
-st.title("📚 SmartPDF QA")
-st.markdown("Upload any PDF and ask questions about its content!")
+st.title("📚 QnA Agent for PDFs")
+st.markdown("Upload any PDF and ask questions about its content! If the answer isn't in the PDF, the app will search the web for you.")
 
 # Initialize session state variables if they don't exist
 if 'pdf_processed' not in st.session_state:
@@ -52,11 +72,7 @@ def process_pdf(uploaded_file):
         docs = loader.load()
         
         # Split the documents into chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         chunks = text_splitter.split_documents(docs)
-        
-        # Initialize the embedding model
-        embedding_model = OpenAIEmbeddings(model="text-embedding-3-large")
         
         # Create a FAISS index
         vector_store = FAISS.from_documents(chunks, embedding_model)
@@ -67,9 +83,6 @@ def process_pdf(uploaded_file):
         st.session_state.file_name = uploaded_file.name
         
         return f"✅ {uploaded_file.name} processed successfully! ({len(chunks)} chunks created)"
-
-# Create two columns for the layout
-# col1, col2 = st.columns([1, 1])
 
 # PDF Upload section
 st.header("Upload PDF")
@@ -82,10 +95,7 @@ if uploaded_file is not None and (not st.session_state.pdf_processed or uploaded
 # Question/Answer section
 st.header("Ask Questions")    
 # If a PDF has been processed, enable the question input
-if st.session_state.pdf_processed and st.session_state.vector_store is not None:
-    # Initialize the chat model
-    llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
-        
+if st.session_state.pdf_processed and st.session_state.vector_store is not None:        
     # Get the prompt template
     prompt = hub.pull("rlm/rag-prompt")
         
@@ -95,17 +105,71 @@ if st.session_state.pdf_processed and st.session_state.vector_store is not None:
     # Format docs function
     def format_docs(docs):
         return "\n\n".join(doc.page_content for doc in docs)
-        
-    # Create the chain
-    chain = (
+    
+    # Create custom prompt for determining if PDF content has the answer
+    answer_determination_prompt = ChatPromptTemplate.from_template("""
+    You are an AI assistant tasked with determining if the provided context from a PDF contains sufficient information to answer a user's question.
+
+    Context from PDF: {context}
+    
+    User Question: {question}
+    
+    First, carefully analyze if the context provides adequate information to answer the question.
+    
+    If the context contains sufficient information to answer the question, respond with a complete and accurate answer based ONLY on the provided context.
+    
+    If the context does NOT contain sufficient information to fully answer the question, respond with exactly: "[NEED_WEB_SEARCH]"
+    
+    Your response:
+    """)
+    
+    # Create the initial RAG chain that determines if PDF content is sufficient
+    determination_chain = (
         {
             "context": retriever | format_docs,
             "question": RunnablePassthrough(),
         }
-        | prompt
+        | answer_determination_prompt
         | llm
         | StrOutputParser()
     )
+    
+    # Create a web search chain
+    web_search_prompt = ChatPromptTemplate.from_template("""
+    You are an AI assistant helping a user with their question.
+    
+    User Question: {question}
+    
+    Web Search Results: {web_results}
+    
+    Using the web search results, provide a comprehensive and accurate answer to the user's question.
+    Make sure to cite sources from the search results where appropriate.
+    """)
+    
+    # Define the web search chain
+    web_search_chain = (
+        {
+            "question": RunnablePassthrough(),
+            "web_results": lambda x: tool.invoke({"query": x})
+        }
+        | web_search_prompt
+        | llm
+        | StrOutputParser()
+    )
+    
+    # Define the combined chain that determines whether to use PDF content or web search
+    def agentic_chain(question):
+        # First try to answer from the PDF
+        pdf_response = determination_chain.invoke(question)
+        
+        # Check if web search is needed
+        if "[NEED_WEB_SEARCH]" in pdf_response:
+            info_message = st.info("Information not found in PDF. Searching the web...")
+            time.sleep(2)
+            info_message.empty()
+            return web_search_chain.invoke(question)
+        else:
+            return pdf_response
         
     # Display chat history
     for i, (question, answer) in enumerate(st.session_state.chat_history):
@@ -126,7 +190,7 @@ if st.session_state.pdf_processed and st.session_state.vector_store is not None:
         with st.chat_message("assistant"):
             message_placeholder = st.empty()
             with st.spinner("Let me think..."):
-                response = chain.invoke(user_question)
+                response = agentic_chain(user_question)
                 full_response = ""
                 for chunk in response.split():
                     full_response += chunk + " "
@@ -143,4 +207,3 @@ if st.session_state.chat_history:
     if st.button("Clear Chat History"):
         st.session_state.chat_history = []
         st.rerun()
-    
